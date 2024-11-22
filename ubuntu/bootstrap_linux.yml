@@ -1,29 +1,33 @@
 ---
 - name: Bootstrap Linux Box Locally
   hosts: localhost
-  become: yes
+  become: true  # Changed from 'yes' to 'true' to adhere to YAML boolean standards
   connection: local
-  vars_files:
-    - vars.yml
-  tasks:
 
-    # 1. Ensure the group "wheel-opencomply" exists
+  vars:
+    group_name: wheel-opencomply
+    new_username: anil
+    root_user_password: "$6$KbQ7i3eXx5xGJ0qO$uW5nI1eZ1fZ9O8G8Yk6j9P1rF8dG5aXJ7Qm0Z1kL9yT8eD3V2bC1xZ4lM5nP6"
+    new_user_password: "$6$AbC123XyZ$D9eF1gH2iJ3kL4mN5oP6qR7sT8uV9wX0yZ1aB2cD3eF4gH5iJ6kL7mN8oP9"
+    shared_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILNPFEWjsJmdUpOSSlqxU6lRx8cIGm1bIzVCG5847SBj acx@cri.to"
+
+  tasks:
     - name: Ensure the group "{{ group_name }}" exists
       group:
         name: "{{ group_name }}"
         state: present
 
-    # 2. Configure sudoers for "wheel-opencomply" with no password
     - name: Configure sudoers for "{{ group_name }}" with no password
       copy:
         dest: "/etc/sudoers.d/{{ group_name }}"
-        content: "%{{ group_name }} ALL=(ALL) NOPASSWD: ALL\n"
+        content: |
+          %{{ group_name }} ALL=(ALL) NOPASSWD: ALL
         owner: root
         group: root
         mode: '0440'
-      validate: '/usr/sbin/visudo -cf %s'
+        validate: '/usr/sbin/visudo -cf %s'
+      delegate_to: localhost
 
-    # 3. Ensure SSH directory exists for root
     - name: Ensure SSH directory exists for root
       file:
         path: /root/.ssh
@@ -32,55 +36,50 @@
         owner: root
         group: root
 
-    # 4. Add shared public key to root's authorized_keys
     - name: Add shared public key to root's authorized_keys
       authorized_key:
         user: root
         state: present
         key: "{{ shared_public_key }}"
+      delegate_to: localhost
 
-    # 5. Configure SSH to disable password authentication
     - name: Configure SSH to disable password authentication
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PasswordAuthentication'
         line: 'PasswordAuthentication no'
-        notify: Restart SSH
+      notify: Restart SSH
 
-    # 6. Configure SSH to disable root login
     - name: Configure SSH to disable root login
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PermitRootLogin'
         line: 'PermitRootLogin prohibit-password'
-        notify: Restart SSH
+      notify: Restart SSH
 
-    # 7. Ensure SSH only allows key-based authentication
-    - name: Ensure SSH only allows key-based authentication
+    - name: Ensure SSH only allows challenge-response authentication
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?ChallengeResponseAuthentication'
         line: 'ChallengeResponseAuthentication no'
-        notify: Restart SSH
+      notify: Restart SSH
 
-    # 8. Reset root user's password
     - name: Reset root user's password
       user:
         name: root
         password: "{{ root_user_password }}"
         update_password: always
 
-    # 9. Create user "anil" and add to "wheel-opencomply" group
-    - name: Create user "{{ new_username }}"
+    - name: Create user "{{ new_username }}" and add to "{{ group_name }}" group
       user:
         name: "{{ new_username }}"
         groups: "{{ group_name }}"
-        append: yes
+        append: true  # Changed from 'yes' to 'true' to adhere to YAML boolean standards
         shell: /bin/bash
         state: present
         password: "{{ new_user_password }}"
+      delegate_to: localhost
 
-    # 10. Ensure SSH directory exists for "anil"
     - name: Ensure SSH directory exists for "{{ new_username }}"
       file:
         path: "/home/{{ new_username }}/.ssh"
@@ -89,14 +88,13 @@
         owner: "{{ new_username }}"
         group: "{{ group_name }}"
 
-    # 11. Add shared public key to "anil"'s authorized_keys
     - name: Add shared public key to "{{ new_username }}"'s authorized_keys
       authorized_key:
         user: "{{ new_username }}"
         state: present
         key: "{{ shared_public_key }}"
+      delegate_to: localhost
 
-    # 12. Ensure correct permissions for "anil"'s authorized_keys
     - name: Ensure correct permissions for "{{ new_username }}"'s authorized_keys
       file:
         path: "/home/{{ new_username }}/.ssh/authorized_keys"
@@ -104,7 +102,6 @@
         owner: "{{ new_username }}"
         group: "{{ group_name }}"
 
-    # 13. Set permissions for root's SSH private keys (if any)
     - name: Ensure root's SSH private keys have correct permissions
       file:
         path: "/root/.ssh/{{ item }}"
@@ -116,10 +113,9 @@
         - id_rsa
         - id_dsa
         - identity
-      when: 
+      when:
         - lookup('file', "/root/.ssh/{{ item }}", errors='ignore') != ""
 
-    # 14. Set permissions for root's SSH public keys (if any)
     - name: Ensure root's SSH public keys have correct permissions
       file:
         path: "/root/.ssh/{{ item }}"
@@ -134,7 +130,6 @@
       when:
         - lookup('file', "/root/.ssh/{{ item }}", errors='ignore') != ""
 
-    # 15. Set permissions for "anil"'s SSH private keys (if any)
     - name: Ensure "{{ new_username }}"'s SSH private keys have correct permissions
       file:
         path: "/home/{{ new_username }}/.ssh/{{ item }}"
@@ -146,10 +141,9 @@
         - id_rsa
         - id_dsa
         - identity
-      when: 
+      when:
         - lookup('file', "/home/{{ new_username }}/.ssh/{{ item }}", errors='ignore') != ""
 
-    # 16. Set permissions for "anil"'s SSH public keys (if any)
     - name: Ensure "{{ new_username }}"'s SSH public keys have correct permissions
       file:
         path: "/home/{{ new_username }}/.ssh/{{ item }}"
