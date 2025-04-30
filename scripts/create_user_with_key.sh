@@ -34,6 +34,8 @@ TARGET_PRIVILEGED_GROUP="" # This will hold the group to actually add the user t
 # Function to print error messages and exit
 error_exit() {
     echo "ERROR: $1" >&2
+    # Clean up temp file before exiting, if it exists
+    cleanup_temp_file
     exit "${2:-1}" # Default exit code 1
 }
 
@@ -46,6 +48,16 @@ usage() {
     echo "                     If omitted, attempts 'sudo' then 'wheel'."
     exit 1
 }
+
+# Function to clean up temporary key file
+cleanup_temp_file() {
+    if [[ -n "$TEMP_KEY_FILE" ]] && [[ -f "$TEMP_KEY_FILE" ]]; then
+        rm -f "$TEMP_KEY_FILE"
+        TEMP_KEY_FILE="" # Clear variable after removal
+    fi
+}
+# Ensure temp file is removed on script exit or interruption
+trap cleanup_temp_file EXIT SIGINT SIGTERM
 
 # --- Pre-flight Checks ---
 
@@ -98,14 +110,7 @@ fi
 
 # 6. Check key source type and prerequisites
 KEY_CONTENT=""
-TEMP_KEY_FILE=""
-
-cleanup_temp_file() {
-    if [[ -n "$TEMP_KEY_FILE" ]] && [[ -f "$TEMP_KEY_FILE" ]]; then
-        rm -f "$TEMP_KEY_FILE"
-    fi
-}
-trap cleanup_temp_file EXIT # Ensure temp file is removed on script exit
+TEMP_KEY_FILE="" # Initialize here
 
 if [[ "$KEY_SOURCE" == http://* ]] || [[ "$KEY_SOURCE" == https://* ]]; then
     echo "INFO: Key source is a URL: $KEY_SOURCE"
@@ -149,14 +154,20 @@ fi
 
 echo "--- Starting User Setup for '$USERNAME' ---"
 
-# 1. Create the user with home directory and disabled password
+# 1. Create the user with home directory
 echo "[1/4] Creating user '$USERNAME'..."
-# Use useradd for simplicity, adduser is interactive
-if ! useradd --create-home --shell /bin/bash --disabled-password "$USERNAME"; then
+# Use useradd without password options first
+if ! useradd --create-home --shell /bin/bash "$USERNAME"; then
     error_exit "Failed to create user '$USERNAME'."
 fi
+# Immediately lock the password to prevent password login
+if ! passwd -l "$USERNAME" > /dev/null; then
+    # Don't necessarily exit, but warn the user. They might still be able to log in with key.
+    echo "WARNING: Failed to lock password for user '$USERNAME'. Password login might still be possible." >&2
+fi
+
 USER_HOME=$(eval echo "~$USERNAME") # Get home directory path reliably
-echo "User '$USERNAME' created with home directory $USER_HOME."
+echo "User '$USERNAME' created with home directory $USER_HOME and password locked."
 
 # 2. Set up SSH directory and authorized_keys file
 echo "[2/4] Configuring SSH access..."
@@ -177,7 +188,8 @@ fi
 # Append the fetched key content to authorized_keys
 # Use tee to ensure atomicity and handle potential errors during write
 echo "$KEY_CONTENT" | tee -a "$AUTH_KEYS_FILE" > /dev/null
-if [[ ${PIPESTATUS[0]} -ne 0 ]] || [[ ${PIPESTATUS[1]} -ne 0 ]]; then
+# Check the status of tee, not echo
+if [[ ${PIPESTATUS[1]} -ne 0 ]]; then
     error_exit "Failed to write key to '$AUTH_KEYS_FILE'."
 fi
 
@@ -207,6 +219,9 @@ else
 fi
 
 # --- Completion ---
+# Clean up temporary file now that we're done with it
+cleanup_temp_file
+
 echo "--- User Setup Complete for '$USERNAME' ---"
 echo "User '$USERNAME' can now log in using the provided SSH key."
 if [[ -n "$TARGET_PRIVILEGED_GROUP" ]]; then
