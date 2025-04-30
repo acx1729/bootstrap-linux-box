@@ -3,14 +3,17 @@
 # ==============================================================================
 # Script Name: create_k3d_cluster.sh
 # Description: Creates a k3d cluster, verifies its status, and exports its
-#              kubeconfig to a shared location for other admin users.
+#              kubeconfig to a shared location. Validates that a specified
+#              target user exists and belongs to the required shared group.
 #
-# Usage:       bash create_k3d_cluster.sh <cluster_name>
+# Usage:       bash create_k3d_cluster.sh <cluster_name> <target_username>
 # Arguments:
-#   <cluster_name>   (Required) The name for the new k3d cluster.
+#   <cluster_name>    (Required) The name for the new k3d cluster.
+#   <target_username> (Required) The username of the intended owner/manager,
+#                       who must exist and be in the SHARED_ACCESS_GROUP.
 #
 # Example:
-#   bash create_k3d_cluster.sh my-shared-cluster
+#   bash create_k3d_cluster.sh my-shared-cluster anil
 # ==============================================================================
 
 set -e # Exit immediately if a command exits with a non-zero status.
@@ -19,16 +22,19 @@ set -u # Treat unset variables as an error.
 # --- Configuration & Variables ---
 # ** IMPORTANT: Set this to the desired shared directory path **
 readonly SHARED_KUBECONFIG_DIR="/usr/local/share/kubeconfig"
-# Group that should have read access to the shared kubeconfig (e.g., 'sudo', 'wheel', 'admin')
+# Group that should have read access to the shared kubeconfig and that the target user must belong to
 readonly SHARED_ACCESS_GROUP="sudo"
 
-# Check if cluster name argument is provided early, before other variables use it
-if [[ $# -eq 0 ]]; then
-    echo "Usage: $0 <cluster_name>" >&2
-    echo "ERROR: Missing required argument: cluster_name" >&2
+# Check if required arguments are provided early
+if [[ $# -ne 2 ]]; then
+    echo "Usage: $0 <cluster_name> <target_username>" >&2
+    echo "ERROR: Missing required arguments." >&2
     exit 1
 fi
+
+# Assign arguments to variables and make TARGET_USER readonly
 CLUSTER_NAME="$1"
+readonly TARGET_USER="$2" # Make the target user constant after assignment
 
 readonly MAX_CHECK_ATTEMPTS=5
 readonly CHECK_WAIT_SECONDS=5
@@ -43,8 +49,9 @@ error_exit() {
 
 # Function to print usage instructions (already called if args missing)
 usage() {
-    echo "Usage: $0 <cluster_name>"
-    echo "  <cluster_name> : Name for the new k3d cluster (required)."
+    echo "Usage: $0 <cluster_name> <target_username>"
+    echo "  <cluster_name>    : Name for the new k3d cluster (required)."
+    echo "  <target_username> : User who should manage this cluster (must exist and be in '$SHARED_ACCESS_GROUP' group)."
     exit 1
 }
 
@@ -55,35 +62,56 @@ if [[ "$CLUSTER_NAME" =~ [^a-zA-Z0-9\-] ]]; then
     error_exit "Cluster name '$CLUSTER_NAME' is invalid. Use only letters, numbers, and hyphens."
 fi
 
-# 2. Check if k3d command exists
+# 2. Check if target user exists
+echo "INFO: Checking if target user '$TARGET_USER' exists..."
+if ! id "$TARGET_USER" &>/dev/null; then
+    error_exit "Target user '$TARGET_USER' does not exist on the system."
+fi
+echo "INFO: Target user '$TARGET_USER' found."
+
+# 3. Check if the shared access group exists
+echo "INFO: Checking if shared access group '$SHARED_ACCESS_GROUP' exists..."
+if ! getent group "$SHARED_ACCESS_GROUP" &>/dev/null; then
+    error_exit "The specified shared access group '$SHARED_ACCESS_GROUP' does not exist on the system."
+fi
+echo "INFO: Shared access group '$SHARED_ACCESS_GROUP' found."
+
+# 4. Check if target user is a member of the shared access group
+echo "INFO: Checking if target user '$TARGET_USER' is a member of group '$SHARED_ACCESS_GROUP'..."
+if ! groups "$TARGET_USER" | grep -q "\b${SHARED_ACCESS_GROUP}\b"; then
+    error_exit "Target user '$TARGET_USER' is NOT a member of the required group '$SHARED_ACCESS_GROUP'."
+fi
+echo "INFO: Target user '$TARGET_USER' is a member of '$SHARED_ACCESS_GROUP'."
+
+# 5. Check if k3d command exists
 if ! command -v k3d &> /dev/null; then
     error_exit "'k3d' command not found. Please install k3d first."
 fi
 
-# 3. Check if kubectl command exists
+# 6. Check if kubectl command exists
 if ! command -v kubectl &> /dev/null; then
     error_exit "'kubectl' command not found. Please install kubectl first."
 fi
 
-# 4. Check Docker daemon connectivity and permissions
-echo "INFO: Checking Docker daemon connectivity..."
+# 7. Check Docker daemon connectivity and permissions (for the user RUNNING the script)
+echo "INFO: Checking Docker daemon connectivity for the current user ($(whoami))..."
 # Use 'docker ps' as a lightweight check requiring connection & permission
 if ! docker ps > /dev/null 2>&1; then
     # If that fails, try 'docker info' for more detailed error potential
     if ! docker info > /dev/null 2>&1; then
-        error_exit "Cannot connect to the Docker daemon or insufficient permissions. Please ensure Docker is installed, running, and that your user has permissions (Hint: Add user to 'docker' group and log out/in: 'sudo usermod -aG docker \$USER')."
+        error_exit "Cannot connect to the Docker daemon or insufficient permissions for user '$(whoami)'. Please ensure Docker is installed, running, and that the user running this script has permissions (Hint: Add user to 'docker' group and log out/in: 'sudo usermod -aG docker $(whoami)')."
     fi
 fi
-echo "INFO: Docker daemon is accessible."
+echo "INFO: Docker daemon is accessible by user '$(whoami)'."
 
-# 5. Check if cluster already exists
+# 8. Check if cluster already exists
 echo "INFO: Checking if cluster '$CLUSTER_NAME' already exists..."
 if k3d cluster list | grep -q "^${CLUSTER_NAME}\s"; then
     error_exit "A k3d cluster named '$CLUSTER_NAME' already exists."
 fi
 echo "INFO: Cluster '$CLUSTER_NAME' does not exist yet."
 
-# 6. Check and potentially create shared directory with correct permissions
+# 9. Check and potentially create shared directory with correct permissions
 echo "INFO: Checking shared kubeconfig directory '$SHARED_KUBECONFIG_DIR'..."
 if [[ ! -d "$SHARED_KUBECONFIG_DIR" ]]; then
     echo "INFO: Shared directory does not exist. Attempting to create it with sudo..."
@@ -103,16 +131,8 @@ if [[ ! -d "$SHARED_KUBECONFIG_DIR" ]]; then
 else
     echo "INFO: Shared directory '$SHARED_KUBECONFIG_DIR' already exists."
     # Optional: Verify existing directory permissions/ownership if needed
-    # if ! sudo [ -w "$SHARED_KUBECONFIG_DIR" ]; then # Example check if root can write
-    #    error_exit "Shared directory '$SHARED_KUBECONFIG_DIR' exists but is not writable by root/sudo. Check permissions."
-    # fi
 fi
 echo "INFO: Shared directory is ready."
-
-# 7. Check if the shared access group exists
-if ! getent group "$SHARED_ACCESS_GROUP" &>/dev/null; then
-    error_exit "The specified shared access group '$SHARED_ACCESS_GROUP' does not exist on the system."
-fi
 
 # --- Main Execution ---
 
@@ -180,13 +200,14 @@ echo "INFO: Kubeconfig exported successfully."
 # --- Completion ---
 echo ""
 echo "--- Cluster '$CLUSTER_NAME' created, verified, and config shared successfully! ---"
+echo "Validated for target user: $TARGET_USER (member of '$SHARED_ACCESS_GROUP')"
 echo ""
-echo "== For the user who ran this script =="
+echo "== For the user who ran this script ($(whoami)) =="
 echo "Your kubectl context should have been automatically switched to 'k3d-$CLUSTER_NAME'."
 echo "You can verify with: kubectl config current-context"
 echo "If needed, switch manually using: kubectl config use-context k3d-$CLUSTER_NAME"
 echo ""
-echo "== For other users in the '$SHARED_ACCESS_GROUP' group =="
+echo "== For user '$TARGET_USER' and other users in the '$SHARED_ACCESS_GROUP' group =="
 echo "Shared Kubeconfig location: $SHARED_KUBECONFIG_FILE"
 echo "They can access the cluster using:"
 echo "  export KUBECONFIG=$SHARED_KUBECONFIG_FILE"
@@ -198,4 +219,3 @@ kubectl get nodes -o wide
 echo "---------------------"
 
 exit 0 # Success
-
